@@ -2,7 +2,7 @@
 
 **Modern cross-platform network stress testing tool for authorized security research and penetration testing.**
 
-![HOIC Banner](assets/hoic-banner.jpg)
+![HOIC Logo](assets/hoic-logo.svg)
 
 > **CRITICAL LEGAL NOTICE**  
 > This tool is provided **strictly for authorized security research, load testing, and penetration testing** where you have **explicit written permission** from the system owner.  
@@ -63,6 +63,16 @@ See [requirements.txt](requirements.txt):
 
 ---
 
+## Unique Logo
+
+The HOIC logo is a custom-designed stylized high-orbit satellite firing a piercing ion/laser beam. The primary asset is a clean vector SVG for perfect rendering at any size:
+
+![Logo](assets/hoic-logo.svg)
+
+Raster versions of the generated satellite laser artwork are also available in the `assets/` folder (or generate new ones for your fork).
+
+---
+
 ## Usage
 
 1. Launch `python hoic.py`
@@ -86,18 +96,6 @@ See [requirements.txt](requirements.txt):
 | Mixed           | 120-250 | Combined pressure                  |
 
 Start low and increase while monitoring the target and your own network.
-
----
-
-## Screenshots
-
-The GUI features:
-- Prominent satellite laser branding
-- Clear live stats panel
-- Scrollable activity log
-- Prominent legal warning strip
-
-![Logo](assets/hoic-logo-1.jpg)
 
 ---
 
@@ -139,10 +137,10 @@ hoic/
 ├── requirements.txt
 ├── README.md
 ├── LICENSE
+├── run-hoic.bat
+├── run-hoic.sh
 └── assets/
-    ├── hoic-logo-1.jpg
-    ├── hoic-logo-2.jpg
-    └── hoic-banner.jpg
+    └── hoic-logo.svg   # Unique satellite laser vector logo
 ```
 
 ---
@@ -165,6 +163,6 @@ MIT License — see [LICENSE](LICENSE).
 
 Developed by Wold Labs for legitimate security research tooling.
 
-Satellite laser logo generated for this project.
+Unique satellite laser logo designed for this project.
 
 **Use responsibly. Get permission first. Always.**
