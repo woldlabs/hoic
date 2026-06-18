@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="laserGrad" x1="256" y1="80" x2="256" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00f0ff"/>
+      <stop offset="40%" stop-color="#0088ff"/>
+      <stop offset="100%" stop-color="#ff2a6d"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <!-- Deep space background -->
+  <rect width="512" height="512" fill="#05070f"/>
+  <!-- Subtle stars -->
+  <g fill="#ffffff" opacity="0.6">
+    <circle cx="80" cy="70" r="1.5"/>
+    <circle cx="420" cy="55" r="1"/>
+    <circle cx="140" cy="180" r="1.2"/>
+    <circle cx="380" cy="130" r="0.8"/>
+    <circle cx="60" cy="320" r="1.3"/>
+    <circle cx="450" cy="290" r="1.1"/>
+    <circle cx="200" cy="420" r="0.9"/>
+    <circle cx="310" cy="35" r="1.4"/>
+  </g>
+  <!-- Earth (stylized, partial) -->
+  <circle cx="256" cy="420" r="68" fill="#0a1f3d"/>
+  <ellipse cx="256" cy="420" rx="68" ry="22" fill="#112b52" opacity="0.7"/>
+  <!-- Orbital rings -->
+  <ellipse cx="256" cy="200" rx="165" ry="42" fill="none" stroke="#334455" stroke-width="2" opacity="0.5"/>
+  <ellipse cx="256" cy="200" rx="145" ry="36" fill="none" stroke="#445566" stroke-width="1" opacity="0.4"/>
+  <!-- Satellite body (sleek high-tech) -->
+  <rect x="212" y="165" width="88" height="52" rx="6" fill="#1f2a3a" stroke="#4a6a88" stroke-width="2"/>
+  <!-- Solar panels -->
+  <rect x="128" y="175" width="78" height="28" rx="2" fill="#0f1f2e" stroke="#3a556b" stroke-width="1.5"/>
+  <rect x="306" y="175" width="78" height="28" rx="2" fill="#0f1f2e" stroke="#3a556b" stroke-width="1.5"/>
+  <!-- Panel grid lines -->
+  <g stroke="#2a4a5a" stroke-width="1" opacity="0.7">
+    <line x1="135" y1="185" x2="200" y2="185"/>
+    <line x1="135" y1="193" x2="200" y2="193"/>
+    <line x1="315" y1="185" x2="200" y2="185"/>
+    <line x1="315" y1="193" x2="380" y2="193"/>
+  </g>
+  <!-- Antenna / dish -->
+  <rect x="248" y="138" width="16" height="28" fill="#3a4a5a"/>
+  <circle cx="256" cy="125" r="14" fill="#1a2a3a" stroke="#5a7a9a" stroke-width="2"/>
+  <!-- Central emitter -->
+  <circle cx="256" cy="192" r="9" fill="#112233"/>
+  <!-- The iconic laser / ion beam -->
+  <g filter="url(#glow)">
+    <!-- Core beam -->
+    <path d="M256 210 L256 390" stroke="url(#laserGrad)" stroke-width="7" stroke-linecap="round" opacity="0.95"/>
+    <!-- Inner bright core -->
+    <path d="M256 210 L256 390" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+    <!-- Side energy ripples -->
+    <path d="M248 230 Q256 260 248 300" fill="none" stroke="#00ddff" stroke-width="1.5" opacity="0.35"/>
+    <path d="M264 240 Q256 275 264 315" fill="none" stroke="#ff4d94" stroke-width="1.5" opacity="0.3"/>
+    <!-- Impact glow on "target" area -->
+    <ellipse cx="256" cy="385" rx="18" ry="7" fill="#ff3366" opacity="0.35"/>
+  </g>
+  <!-- HOIC text mark (minimal) -->
+  <text x="256" y="100" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700" fill="#00e0ff" text-anchor="middle" letter-spacing="4">HOIC</text>
+  <!-- Small orbit indicators -->
+  <circle cx="140" cy="200" r="3.5" fill="#00c8ff" opacity="0.8"/>
+  <circle cx="372" cy="200" r="3.5" fill="#ff3d7a" opacity="0.8"/>
+</svg>
