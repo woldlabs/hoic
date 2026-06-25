@@ -298,6 +298,25 @@ class TestAttackConfig(unittest.TestCase):
         self.assertEqual(cfg.attack_message, "")
 
 
+class TestPowerLevel(unittest.TestCase):
+    def test_idle_power_level(self):
+        self.assertEqual(hoic.compute_power_level({}, attacking=False), 5)
+
+    def test_attacking_power_level_over_9000(self):
+        stats = {
+            "sent": 5000,
+            "rate": 250.0,
+            "errors": 50,
+            "latency": {"p95": 120.0},
+            "workers": 150,
+        }
+        level = hoic.compute_power_level(stats, workers=150, attacking=True)
+        self.assertGreaterEqual(level, 9000)
+
+    def test_format_power_level(self):
+        self.assertEqual(hoic.format_power_level(18000), "Power Level: 18,000")
+
+
 class TestSuperpositionStorm(unittest.TestCase):
     def test_compute_vector_pain_score(self):
         low = hoic.compute_vector_pain_score(100, 0, 50.0)

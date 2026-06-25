@@ -122,6 +122,7 @@ MESSAGE_SUPPORTED_MODES = HTTP_MESSAGE_MODES | PAYLOAD_MESSAGE_MODES
 WORKERS_MIN = 5
 WORKERS_MAX = 800
 WORKERS_DEFAULT = 150
+HOIC_VERSION = "v1.2.1"
 
 
 @dataclass
@@ -281,6 +282,45 @@ def active_resonance_workers(base_workers: int, elapsed: float, period: float = 
     """Scale live worker count around the discovered breakpoint."""
     factor = resonance_wave_factor(elapsed, period=period)
     return max(1, int(base_workers * factor))
+
+
+def compute_power_level(
+    stats: Dict[str, Any],
+    workers: int = WORKERS_DEFAULT,
+    attacking: bool = False,
+) -> int:
+    """DBZ scouter-style power level derived from live attack intensity."""
+    sent = stats.get("sent", 0)
+    if not attacking and sent == 0:
+        return 5  # farmer with shotgun
+
+    rate = stats.get("rate", 0)
+    errors = stats.get("errors", 0)
+    p95 = stats.get("latency", {}).get("p95", 0) or 0
+    saturation = stats.get("saturation_point") or 0
+    dominant = stats.get("dominant_vector")
+    weights = stats.get("vector_weights", {})
+
+    level = 8000  # over-9000 baseline once the attack is live
+    level += int(rate * 12)
+    level += min(errors, 5000) * 3
+    level += int(p95 * 1.5)
+    level += saturation * 42
+    level += workers * 18
+    if dominant and weights:
+        level += int(weights.get(dominant, 0) * 4200)
+    if rate > 500:
+        level += 9000
+    if rate > 2000:
+        level += 50000
+    if errors > 100 and rate > 100:
+        level += 18000  # Vegeta-tier pressure
+
+    return max(5, min(level, 9_999_999))
+
+
+def format_power_level(level: int) -> str:
+    return f"Power Level: {level:,}"
 
 
 def compute_vector_pain_score(sent: int, errors: int, avg_latency_ms: float) -> float:
@@ -1213,7 +1253,7 @@ class HOICApp:
         ).pack(side="left")
         ctk.CTkLabel(
             title_frame,
-            text="  v1.2  •  Authorized Security Research Tool",
+            text=f"  {HOIC_VERSION}  •  Authorized Security Research Tool",
             font=ctk.CTkFont(size=12),
             text_color="#777777",
         ).pack(side="left", padx=12)
@@ -1387,10 +1427,10 @@ class HOICApp:
         self.stat_p95 = ctk.CTkLabel(stats_grid, text="p95: —", font=ctk.CTkFont(size=13))
         self.stat_p95.grid(row=1, column=1, padx=8, sticky="w")
 
-        self.stat_superpower = ctk.CTkLabel(
-            stats_grid, text="Superpower: —", font=ctk.CTkFont(size=13), text_color="#88ccff"
+        self.stat_power_level = ctk.CTkLabel(
+            stats_grid, text="Power Level: 5", font=ctk.CTkFont(size=13), text_color="#88ccff"
         )
-        self.stat_superpower.grid(row=1, column=2, padx=8, sticky="w")
+        self.stat_power_level.grid(row=1, column=2, padx=8, sticky="w")
 
         ctk.CTkLabel(right, text="ACTIVITY LOG", font=ctk.CTkFont(size=14, weight="bold")).pack(
             anchor="w", padx=12, pady=(4, 2)
@@ -1551,6 +1591,11 @@ class HOICApp:
                     "probe_history": stats.get("probe_history", []),
                     "dominant_vector": stats.get("dominant_vector"),
                     "vector_weights": stats.get("vector_weights", {}),
+                    "power_level": compute_power_level(
+                        stats,
+                        workers=cfg.workers if cfg else self._read_workers_slider(),
+                        attacking=bool(self.controller.running),
+                    ),
                 },
                 "log_excerpt": log_content.splitlines()[-50:],
             }
@@ -1607,16 +1652,15 @@ class HOICApp:
             p95 = lat.get("p95", 0)
             self.stat_p95.configure(text=f"p95: {p95:.0f}ms" if p95 else "p95: —")
 
-            dominant = stats.get("dominant_vector")
-            weights = stats.get("vector_weights", {})
-            sat = stats.get("saturation_point")
-            if dominant and weights:
-                pct = int(weights.get(dominant, 0) * 100)
-                self.stat_superpower.configure(text=f"Dominant: {dominant} ({pct}%)")
-            elif sat is not None:
-                self.stat_superpower.configure(text=f"Breakpoint: {sat}")
-            else:
-                self.stat_superpower.configure(text="Superpower: —")
+            workers = self._read_workers_slider()
+            if self.last_config:
+                workers = self.last_config.workers
+            power = compute_power_level(
+                stats,
+                workers=workers,
+                attacking=self.controller.running,
+            )
+            self.stat_power_level.configure(text=format_power_level(power))
 
             if self.controller.running:
                 self.status_label.configure(text="ATTACKING", text_color="#ff5555")

@@ -27,7 +27,7 @@
   - **Superposition Storm** — self-adapting multi-vector assault (see below)
 - **Attack Message** field — embed custom text in HTTP bodies/headers or UDP/TCP payloads (visible in Wireshark)
 - Beautiful, functional **dark-themed GUI** built with CustomTkinter
-- Real-time statistics (rate, errors, p95 latency, saturation breakpoint, **dominant attack vector**)
+- Real-time statistics (rate, errors, p95 latency, **DBZ-style Power Level** scouter readout)
 - **Export Report** — JSON + human-readable summary for pentest documentation
 - Cross-platform: **Windows** and **Linux**
 - Unit test suite (`test_hoic.py`)
