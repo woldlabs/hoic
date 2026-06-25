@@ -1,0 +1,4 @@
+customtkinter>=5.2.0
+aiohttp>=3.9.0
+pillow>=10.0.0
+# aiohttp-socks optional for future proxy support (not used yet)
