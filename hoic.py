@@ -99,6 +99,10 @@ MESSAGE_SUPPORTED_MODES = {
     "Adaptive Saturation Seeker",
 }
 
+WORKERS_MIN = 5
+WORKERS_MAX = 800
+WORKERS_DEFAULT = 150
+
 
 @dataclass
 class AttackConfig:
@@ -127,6 +131,15 @@ class AttackConfig:
 def make_payload(size: int) -> bytes:
     """Generate random payload bytes for flood packets."""
     return os.urandom(max(1, size))
+
+
+def normalize_worker_count(
+    value: float,
+    min_workers: int = WORKERS_MIN,
+    max_workers: int = WORKERS_MAX,
+) -> int:
+    """Round slider float to a whole worker count within bounds."""
+    return max(min_workers, min(max_workers, int(round(value))))
 
 
 def mode_supports_message(mode: str) -> bool:
@@ -912,12 +925,20 @@ class HOICApp:
         ctk.CTkLabel(left, text="WORKERS (concurrency)", font=ctk.CTkFont(size=13)).pack(
             anchor="w", padx=12, pady=(10, 0)
         )
-        self.workers_slider = ctk.CTkSlider(left, from_=5, to=800, number_of_steps=100)
+        # One step per worker so slider values are exact integers (5–800)
+        self.workers_slider = ctk.CTkSlider(
+            left,
+            from_=WORKERS_MIN,
+            to=WORKERS_MAX,
+            number_of_steps=WORKERS_MAX - WORKERS_MIN,
+        )
         self.workers_slider.pack(fill="x", padx=12, pady=2)
-        self.workers_slider.set(150)
-        self.workers_label = ctk.CTkLabel(left, text="150")
+        self.workers_slider.set(WORKERS_DEFAULT)
+        self.workers_label = ctk.CTkLabel(left, text=str(self._read_workers_slider()))
         self.workers_label.pack(anchor="w", padx=12)
-        self.workers_slider.configure(command=lambda v: self.workers_label.configure(text=str(int(v))))
+        self.workers_slider.configure(
+            command=lambda v: self.workers_label.configure(text=str(normalize_worker_count(v)))
+        )
 
         ctk.CTkLabel(
             left, text="DURATION (seconds, 0 = until stopped)", font=ctk.CTkFont(size=13)
@@ -1061,6 +1082,9 @@ class HOICApp:
 
         self._update_message_field_state(self.mode_var.get())
 
+    def _read_workers_slider(self) -> int:
+        return normalize_worker_count(self.workers_slider.get())
+
     def _update_message_field_state(self, mode: str):
         supported = mode_supports_message(mode)
         if supported:
@@ -1165,7 +1189,7 @@ class HOICApp:
                     "mode": cfg.mode if cfg else self.mode_var.get(),
                 },
                 "config": {
-                    "workers": cfg.workers if cfg else int(self.workers_slider.get()),
+                    "workers": cfg.workers if cfg else self._read_workers_slider(),
                     "duration": cfg.duration if cfg else self._parse_port(self.duration_entry.get(), 0),
                     "packet_size": cfg.packet_size if cfg else self._parse_port(self.size_entry.get(), 1024),
                     "attack_message": cfg.attack_message if cfg else "",
@@ -1258,9 +1282,9 @@ class HOICApp:
             return None
 
         try:
-            workers = int(self.workers_slider.get())
+            workers = self._read_workers_slider()
         except Exception:
-            workers = 100
+            workers = WORKERS_DEFAULT
 
         try:
             duration = int(self.duration_entry.get().strip() or "0")

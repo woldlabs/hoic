@@ -27,6 +27,12 @@ class TestPureHelpers(unittest.TestCase):
         self.assertEqual(headers["Host"], "test.example")
         self.assertIn("User-Agent", headers)
 
+    def test_normalize_worker_count(self):
+        self.assertEqual(hoic.normalize_worker_count(150.0), 150)
+        self.assertEqual(hoic.normalize_worker_count(148.1), 148)
+        self.assertEqual(hoic.normalize_worker_count(800.4), 800)
+        self.assertEqual(hoic.normalize_worker_count(2.0), 5)
+
     def test_mode_supports_message(self):
         self.assertTrue(hoic.mode_supports_message("HTTP Flood"))
         self.assertTrue(hoic.mode_supports_message("Slowloris (HTTP)"))
