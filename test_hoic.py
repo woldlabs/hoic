@@ -298,6 +298,35 @@ class TestAttackConfig(unittest.TestCase):
         self.assertEqual(cfg.attack_message, "")
 
 
+class TestSuperpositionStorm(unittest.TestCase):
+    def test_compute_vector_pain_score(self):
+        low = hoic.compute_vector_pain_score(100, 0, 50.0)
+        high = hoic.compute_vector_pain_score(100, 40, 1500.0)
+        self.assertGreater(high, low)
+
+    def test_adapt_vector_weights_favors_pain(self):
+        weights = {v: 0.2 for v in hoic.SUPERPOSITION_VECTORS}
+        pain = {v: 0.1 for v in hoic.SUPERPOSITION_VECTORS}
+        pain["udp_burst"] = 2.5
+        new = hoic.adapt_vector_weights(weights, pain)
+        self.assertGreater(new["udp_burst"], new["http_get"])
+
+    def test_select_vector_by_weight(self):
+        weights = {"a": 1.0, "b": 0.0}
+        self.assertEqual(hoic.select_vector_by_weight(weights), "a")
+
+    def test_superposition_controller_adapt(self):
+        ctrl = hoic.SuperpositionController()
+        ctrl.record("tcp_connect", sent=50, errors=30, latency_ms=1800)
+        ctrl.record("http_get", sent=50, errors=2, latency_ms=40)
+        dominant, weights, pain = ctrl.adapt()
+        self.assertIn(dominant, hoic.SUPERPOSITION_VECTORS)
+        self.assertGreater(weights[dominant], weights["http_get"])
+
+    def test_superposition_in_modes(self):
+        self.assertIn("Superposition Storm", hoic.ATTACK_MODES)
+
+
 class TestAttackModes(unittest.TestCase):
     def test_saturation_seeker_in_modes(self):
         self.assertIn("Adaptive Saturation Seeker", hoic.ATTACK_MODES)

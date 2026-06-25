@@ -2,6 +2,10 @@
 
 **Modern cross-platform network stress testing tool for authorized security research and penetration testing.**
 
+<p align="center">
+  <img src="assets/hoic-logo.svg" alt="HOIC Logo" width="220"/>
+</p>
+
 ![HOIC Banner](assets/hoic-banner.jpg)
 
 > **CRITICAL LEGAL NOTICE**  
@@ -19,28 +23,44 @@
   - **TCP Flood**
   - **Slowloris** (slow HTTP connection exhaustion)
   - **Mixed** mode (HTTP + UDP)
-  - **Adaptive Saturation Seeker** — auto-discovers the target's breaking point (see below)
+  - **Adaptive Saturation Seeker** — auto-discovers the target's breaking point
+  - **Superposition Storm** — self-adapting multi-vector assault (see below)
+- **Attack Message** field — embed custom text in HTTP bodies/headers or UDP/TCP payloads (visible in Wireshark)
 - Beautiful, functional **dark-themed GUI** built with CustomTkinter
-- Real-time statistics (rate, total sent, errors, elapsed, **p95 latency**, **saturation breakpoint**)
-- Configurable workers, duration, and packet size
-- **Export Report** button — saves JSON + human-readable summary of the run (ideal for pentest documentation)
+- Real-time statistics (rate, errors, p95 latency, saturation breakpoint, **dominant attack vector**)
+- **Export Report** — JSON + human-readable summary for pentest documentation
 - Cross-platform: **Windows** and **Linux**
-- Built-in header randomization and modern browser User-Agents
-- Explicit authorization checkbox + final confirmation dialog
-- Auto-stop timer
-- Unit test suite (`test_hoic.py`) for core engine logic
+- Unit test suite (`test_hoic.py`)
 
 ---
 
-## Adaptive Saturation Seeker (New)
+## Superposition Storm
+
+HOIC's most advanced mode. Five attack vectors run in **quantum superposition** simultaneously:
+
+| Vector | What it does |
+|--------|----------------|
+| `http_get` | Async HTTP flood with randomized headers |
+| `http_post` | Large binary POST bursts |
+| `udp_burst` | Volumetric UDP datagrams |
+| `tcp_connect` | TCP connection + payload storms |
+| `slowloris_micro` | Short-lived incomplete HTTP connections |
+
+Every **5 seconds**, a **pain-bandit controller** measures which vector is causing the most errors and latency on the target, then **shifts worker probability** toward that vector — automatically finding and exploiting the target's **weakest layer** (application, connection pool, UDP handler, etc.).
+
+The live stats panel shows the **dominant vector** and its weight. Full vector weight history is included in exported reports.
+
+**Recommended settings:** workers 150–300, duration ≥ 60s.
+
+---
+
+## Adaptive Saturation Seeker
 
 Unlike fixed-rate flood modes, **Adaptive Saturation Seeker** intelligently finds where your target starts to fail:
 
 1. **Binary-search probes** — ramps concurrency in short probe windows and measures error rate + p95 latency at each step.
 2. **Breakpoint detection** — identifies the maximum sustainable worker count before errors exceed 10% or p95 latency exceeds 2s.
-3. **Resonance wave hold** — after discovery, modulates load in a sine envelope around the breakpoint to expose autoscaling oscillation and flash-crowd instability patterns that constant-rate tools miss.
-
-The discovered breakpoint appears live in the stats panel and is included in exported reports with full probe history — invaluable for capacity planning and pentest documentation.
+3. **Resonance wave hold** — after discovery, modulates load in a sine envelope around the breakpoint to expose autoscaling oscillation.
 
 **Recommended settings:** workers slider = max search bound (e.g. 200–400), duration ≥ 60s.
 
@@ -59,29 +79,17 @@ The discovered breakpoint appears live in the stats panel and is included in exp
 git clone https://github.com/woldlabs/hoic.git
 cd hoic
 
-# Create and activate a virtual environment (recommended)
 python3 -m venv .venv
 source .venv/bin/activate        # Linux / macOS
-# .venv\Scripts\activate         # Windows (PowerShell / CMD)
+# .venv\Scripts\activate         # Windows
 
 pip install -r requirements.txt
-
 python hoic.py
 ```
 
-**Easier cross-platform launchers** (auto setup venv + deps):
-- Windows: double-click `run-hoic.bat`
+**Easier launchers:**
+- Windows: `run-hoic.bat`
 - Linux / macOS: `chmod +x run-hoic.sh && ./run-hoic.sh`
-
-On Windows you can also double-click `hoic.py` after installing dependencies (or create a shortcut).
-
-### Requirements
-
-See [requirements.txt](requirements.txt):
-
-- customtkinter
-- aiohttp
-- pillow
 
 ### Running Tests
 
@@ -94,48 +102,38 @@ python -m unittest test_hoic -v
 ## Usage
 
 1. Launch `python hoic.py`
-2. Read and accept the legal warning dialog.
-3. Enter the **target host** (domain or IP) and **port**.
+2. Accept the legal warning dialog.
+3. Enter **target host** and **port**.
 4. Select **Attack Mode**.
-5. Adjust **Workers** (concurrency) and **Duration**.
-6. **Check the authorization checkbox** — you must have explicit permission.
-7. Click **START ATTACK**.
-8. Monitor live stats and log.
-9. Click **STOP** or wait for duration to expire.
-10. Use **Export Report** for a JSON + summary file of the run (great for documentation).
+5. Adjust **Workers** and **Duration**.
+6. Optionally set an **Attack Message** (embedded in traffic for packet capture tagging).
+7. Check the **authorization checkbox**.
+8. Click **START ATTACK**.
+9. Monitor live stats and log.
+10. **Export Report** when done.
 
-### Recommended Starting Points for Research
+### Recommended Starting Points
 
 | Mode                      | Workers | Notes                              |
 |---------------------------|---------|------------------------------------|
-| HTTP Flood                | 100-300 | Good for web app testing           |
-| HTTPS Flood               | 80-200  | TLS adds overhead                  |
+| HTTP Flood                | 100-300 | Web app testing                    |
+| HTTPS Flood               | 80-200  | TLS overhead                       |
 | UDP Flood                 | 150-400 | Layer 4 volumetric                 |
 | Slowloris                 | 80-200  | Connection exhaustion              |
 | Mixed                     | 120-250 | Combined pressure                  |
 | Adaptive Saturation Seeker| 200-400 | Max search bound; duration 60s+    |
-
-Start low and increase while monitoring the target and your own network.
-
----
-
-## Screenshots
-
-The GUI features:
-- Clear live stats panel (including p95 latency and saturation breakpoint)
-- Scrollable activity log
-- Prominent legal warning strip
+| Superposition Storm       | 150-300 | Auto-finds weakest layer; 60s+     |
 
 ---
 
 ## Modern Methods Explained
 
-- **HTTP/HTTPS Flood**: Uses asynchronous HTTP client with randomized headers, query strings, and optional POST payloads. High concurrency without thread explosion. Tracks per-request latency percentiles.
-- **UDP Flood**: Sends large numbers of UDP datagrams to exhaust bandwidth / application processing.
-- **TCP Flood**: Opens many connections and sends data bursts.
-- **Slowloris**: Holds many connections open by sending incomplete HTTP requests and periodic keep-alive headers.
-- **Adaptive Saturation Seeker**: Binary-searches concurrency to find the performance knee, then applies resonance-wave modulation to stress autoscaling systems.
-- Header rotation, random referers, and X- headers help bypass naive filters for realistic testing scenarios.
+- **HTTP/HTTPS Flood**: Async HTTP with randomized headers, POST bodies, latency tracking.
+- **UDP/TCP Flood**: High-volume datagrams and connection storms; optional `HOICMSG:` payload prefix.
+- **Slowloris**: Incomplete HTTP requests holding connections open.
+- **Adaptive Saturation Seeker**: Binary-search concurrency knee + resonance-wave hold.
+- **Superposition Storm**: Five vectors in parallel with pain-bandit adaptation toward the weakest target layer.
+- **Attack Message**: Cleartext tagging via HTTP POST body, headers, User-Agent suffix, or UDP/TCP payload prefix.
 
 ---
 
@@ -143,19 +141,8 @@ The GUI features:
 
 - **Do not test production systems without permission and a maintenance window.**
 - High packet rates can saturate your own uplink or trigger ISP protections.
-- Some attack types (especially raw sockets) may require administrator/root privileges on certain platforms.
+- HTTPS modes encrypt traffic — use HTTP Flood for cleartext packet inspection.
 - This is **not** a stealth tool. Traffic is noisy by design.
-
----
-
-## Building a Standalone Executable (Optional)
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --add-data "assets;assets" hoic.py
-```
-
-On Linux use `--add-data "assets:assets"`.
 
 ---
 
@@ -164,7 +151,7 @@ On Linux use `--add-data "assets:assets"`.
 ```
 hoic/
 ├── hoic.py            # Main application (GUI + attack engine)
-├── test_hoic.py       # Unit tests for core logic
+├── test_hoic.py       # Unit tests
 ├── requirements.txt
 ├── README.md
 ├── LICENSE
@@ -179,22 +166,10 @@ hoic/
 
 ---
 
-## Contributing
-
-Pull requests for improved attack realism, better UX, proxy support, or documentation are welcome — but **only** if they maintain the strict authorized-use focus.
-
----
-
 ## License
 
 MIT License — see [LICENSE](LICENSE).
 
-**Remember**: Having source code access does **not** grant you permission to attack anyone.
-
----
-
-## Credits
-
-Developed by Wold Labs for legitimate security research tooling.
-
 **Use responsibly. Get permission first. Always.**
+
+Developed by [Wold Labs](https://github.com/woldlabs) for legitimate security research tooling.

