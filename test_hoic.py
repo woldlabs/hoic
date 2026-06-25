@@ -36,16 +36,34 @@ class TestPureHelpers(unittest.TestCase):
     def test_mode_supports_message(self):
         self.assertTrue(hoic.mode_supports_message("HTTP Flood"))
         self.assertTrue(hoic.mode_supports_message("Slowloris (HTTP)"))
-        self.assertFalse(hoic.mode_supports_message("UDP Flood"))
-        self.assertFalse(hoic.mode_supports_message("TCP Flood"))
+        self.assertTrue(hoic.mode_supports_message("UDP Flood"))
+        self.assertTrue(hoic.mode_uses_payload_message("UDP Flood"))
+        self.assertTrue(hoic.mode_uses_http_message("HTTP Flood"))
+        self.assertFalse(hoic.mode_uses_http_message("UDP Flood"))
+
+    def test_embed_message_in_payload(self):
+        payload = hoic.embed_message_in_payload(64, "capture-me")
+        self.assertTrue(payload.startswith(b"HOICMSG:capture-me|"))
+        self.assertEqual(len(payload), 64)
+
+    def test_build_message_post_body(self):
+        body = hoic.build_message_post_body("ticket 42")
+        self.assertIn(b"hoic_message=ticket+42", body)
+
+    def test_message_is_set(self):
+        self.assertTrue(hoic.message_is_set("hello"))
+        self.assertFalse(hoic.message_is_set("   "))
 
     def test_sanitize_http_header_value(self):
         self.assertEqual(hoic.sanitize_http_header_value("hello\r\nworld"), "helloworld")
         self.assertEqual(hoic.sanitize_http_header_value("  test  "), "test")
 
     def test_apply_message_to_headers(self):
-        headers = hoic.apply_message_to_headers({"Host": "x"}, "pentest-ticket-42")
+        headers = hoic.apply_message_to_headers(
+            {"Host": "x", "User-Agent": "TestAgent"}, "pentest-ticket-42"
+        )
         self.assertEqual(headers["X-HOIC-Message"], "pentest-ticket-42")
+        self.assertIn("[HOIC:pentest-ticket-42]", headers["User-Agent"])
 
     def test_apply_message_to_params(self):
         params = hoic.apply_message_to_params({"t": 1}, "load-test-alpha")
@@ -226,15 +244,16 @@ class TestHttpProbeIntegration(unittest.TestCase):
         self.assertGreaterEqual(probe["p95_ms"], 0)
 
     def test_http_message_delivered_in_probe(self):
-        received = {"header": None, "query": None}
+        received = {"header": None, "body": None, "method": None}
 
         async def handler(request):
+            received["method"] = request.method
             received["header"] = request.headers.get("X-HOIC-Message")
-            received["query"] = request.rel_url.query.get("msg")
+            received["body"] = await request.text()
             return web.Response(text="ok")
 
         app = web.Application()
-        app.router.add_get("/", handler)
+        app.router.add_route("*", "/", handler)
         runner = web.AppRunner(app)
         self.loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -259,10 +278,15 @@ class TestHttpProbeIntegration(unittest.TestCase):
             self.loop.run_until_complete(
                 controller._run_http_probe(url, cfg, worker_count=2, duration=1.0, use_ssl=False)
             )
+            self.assertEqual(received["method"], "POST")
             self.assertEqual(received["header"], "ticket-ABC-123")
-            self.assertEqual(received["query"], "ticket-ABC-123")
+            self.assertIn("hoic_message=ticket-ABC-123", received["body"])
         finally:
             self.loop.run_until_complete(runner.cleanup())
+
+    def test_udp_payload_contains_message_marker(self):
+        payload = hoic.embed_message_in_payload(128, "wireshark-test")
+        self.assertIn(b"HOICMSG:wireshark-test|", payload)
 
 
 class TestAttackConfig(unittest.TestCase):

