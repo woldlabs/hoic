@@ -27,6 +27,28 @@ class TestPureHelpers(unittest.TestCase):
         self.assertEqual(headers["Host"], "test.example")
         self.assertIn("User-Agent", headers)
 
+    def test_mode_supports_message(self):
+        self.assertTrue(hoic.mode_supports_message("HTTP Flood"))
+        self.assertTrue(hoic.mode_supports_message("Slowloris (HTTP)"))
+        self.assertFalse(hoic.mode_supports_message("UDP Flood"))
+        self.assertFalse(hoic.mode_supports_message("TCP Flood"))
+
+    def test_sanitize_http_header_value(self):
+        self.assertEqual(hoic.sanitize_http_header_value("hello\r\nworld"), "helloworld")
+        self.assertEqual(hoic.sanitize_http_header_value("  test  "), "test")
+
+    def test_apply_message_to_headers(self):
+        headers = hoic.apply_message_to_headers({"Host": "x"}, "pentest-ticket-42")
+        self.assertEqual(headers["X-HOIC-Message"], "pentest-ticket-42")
+
+    def test_apply_message_to_params(self):
+        params = hoic.apply_message_to_params({"t": 1}, "load-test-alpha")
+        self.assertEqual(params["msg"], "load-test-alpha")
+
+    def test_build_random_headers_with_message(self):
+        headers = hoic.build_random_headers("test.example", "authorized-run")
+        self.assertEqual(headers["X-HOIC-Message"], "authorized-run")
+
     def test_compute_error_rate(self):
         self.assertEqual(hoic.compute_error_rate(90, 10), 0.1)
         self.assertEqual(hoic.compute_error_rate(0, 0), 0.0)
@@ -197,6 +219,45 @@ class TestHttpProbeIntegration(unittest.TestCase):
         self.assertGreater(probe["sent"], 0)
         self.assertGreaterEqual(probe["p95_ms"], 0)
 
+    def test_http_message_delivered_in_probe(self):
+        received = {"header": None, "query": None}
+
+        async def handler(request):
+            received["header"] = request.headers.get("X-HOIC-Message")
+            received["query"] = request.rel_url.query.get("msg")
+            return web.Response(text="ok")
+
+        app = web.Application()
+        app.router.add_get("/", handler)
+        runner = web.AppRunner(app)
+        self.loop.run_until_complete(runner.setup())
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        self.loop.run_until_complete(site.start())
+        port = site._server.sockets[0].getsockname()[1]
+
+        try:
+            controller = hoic.AttackController(
+                log_callback=lambda m: None,
+                stats_callback=lambda s: None,
+            )
+            cfg = hoic.AttackConfig(
+                target_host="127.0.0.1",
+                target_port=port,
+                mode="HTTP Flood",
+                workers=2,
+                duration=2,
+                timeout=3.0,
+                attack_message="ticket-ABC-123",
+            )
+            url = f"http://127.0.0.1:{port}/"
+            self.loop.run_until_complete(
+                controller._run_http_probe(url, cfg, worker_count=2, duration=1.0, use_ssl=False)
+            )
+            self.assertEqual(received["header"], "ticket-ABC-123")
+            self.assertEqual(received["query"], "ticket-ABC-123")
+        finally:
+            self.loop.run_until_complete(runner.cleanup())
+
 
 class TestAttackConfig(unittest.TestCase):
     def test_defaults(self):
@@ -204,6 +265,7 @@ class TestAttackConfig(unittest.TestCase):
         self.assertEqual(cfg.workers, 150)
         self.assertEqual(cfg.probe_duration, 5)
         self.assertEqual(cfg.saturation_error_threshold, 0.10)
+        self.assertEqual(cfg.attack_message, "")
 
 
 class TestAttackModes(unittest.TestCase):
